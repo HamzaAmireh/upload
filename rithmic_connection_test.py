@@ -8,7 +8,6 @@ import os
 import pathlib
 import ssl
 import sys
-from collections import defaultdict
 
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
@@ -303,11 +302,11 @@ async def login(ws, modules, system_name, username, password):
     request = modules["login_request"].RequestLogin()
     request.template_id = 10
     request.template_version = "5.55"
-    request.user_msg.append("connection-test")
+    request.user_msg.append("hello")
     request.user = username
     request.password = password
-    request.app_name = "rithmic_connection_test.py"
-    request.app_version = "1.0"
+    request.app_name = "SampleMD.py"
+    request.app_version = "0.3.0.0"
     request.system_name = system_name
     request.infra_type = modules["login_request"].RequestLogin.SysInfraType.TICKER_PLANT
     await ws.send(request.SerializeToString())
@@ -341,12 +340,14 @@ async def subscribe(ws, modules, exchange, symbol, depth):
     request_type = modules["market_data_request"].RequestMarketDataUpdate
     request = request_type()
     request.template_id = 100
-    request.user_msg.append("connection-test")
+    correlation_id = f"connection-test:{symbol}"
+    request.user_msg.append(correlation_id)
     request.symbol = symbol
     request.exchange = exchange
     request.request = request_type.Request.SUBSCRIBE
     request.update_bits = market_data_update_bits(modules, depth)
     await ws.send(request.SerializeToString())
+    return correlation_id
 
 
 def print_decoded(template_id, message):
@@ -356,14 +357,28 @@ def print_decoded(template_id, message):
     print(message)
 
 
-async def listen(ws, modules, duration, heartbeat_interval, exchange, symbol, depth):
-    counts = defaultdict(int)
-    all_bid_prices = set()
-    all_ask_prices = set()
-    max_bid_levels_in_message = 0
-    max_ask_levels_in_message = 0
-    subscription_ack = None
+async def listen(
+    ws, modules, duration, heartbeat_interval, exchange, symbols, depth, correlation_ids
+):
+    results = {
+        symbol: {
+            "ack": None,
+            "bbo": 0,
+            "last_trade": 0,
+            "order_book": 0,
+            "bid_prices": set(),
+            "ask_prices": set(),
+            "max_bid_levels": 0,
+            "max_ask_levels": 0,
+        }
+        for symbol in symbols
+    }
+    token_to_symbol = {
+        token: symbol for symbol, token in correlation_ids.items()
+    }
     deadline = asyncio.get_running_loop().time() + duration
+    connection_closed = None
+    ended_early = None
 
     while True:
         remaining = deadline - asyncio.get_running_loop().time()
@@ -376,71 +391,113 @@ async def listen(ws, modules, duration, heartbeat_interval, exchange, symbol, de
         except asyncio.TimeoutError:
             request = modules["heartbeat_request"].RequestHeartbeat()
             request.template_id = 18
-            await ws.send(request.SerializeToString())
+            try:
+                await ws.send(request.SerializeToString())
+            except ConnectionClosed as error:
+                connection_closed = error
+                print(
+                    f"\nWebSocket closed while sending heartbeat "
+                    f"(code={error.code}, reason={error.reason!r})."
+                )
+                break
             continue
+        except ConnectionClosed as error:
+            connection_closed = error
+            print(
+                f"\nWebSocket closed during data collection "
+                f"(code={error.code}, reason={error.reason!r})."
+            )
+            break
 
         template_id, _, message = decode_message(modules, payload)
         if template_id in (150, 151, ORDER_BOOK_TEMPLATE_ID):
-            print_decoded(template_id, message)
             received_symbol = getattr(message, "symbol", "")
             received_exchange = getattr(message, "exchange", "")
-            if received_symbol and received_symbol != symbol:
+            if received_symbol not in results:
                 continue
             if received_exchange and received_exchange != exchange:
                 continue
-            counts[template_id] += 1
+            result = results[received_symbol]
+            result_key = {
+                150: "last_trade",
+                151: "bbo",
+                ORDER_BOOK_TEMPLATE_ID: "order_book",
+            }[template_id]
+            result[result_key] += 1
+            print_decoded(template_id, message)
 
             if template_id == ORDER_BOOK_TEMPLATE_ID:
                 bid_prices = set(message.bid_price)
                 ask_prices = set(message.ask_price)
-                all_bid_prices.update(bid_prices)
-                all_ask_prices.update(ask_prices)
-                max_bid_levels_in_message = max(max_bid_levels_in_message, len(bid_prices))
-                max_ask_levels_in_message = max(max_ask_levels_in_message, len(ask_prices))
+                result["bid_prices"].update(bid_prices)
+                result["ask_prices"].update(ask_prices)
+                result["max_bid_levels"] = max(
+                    result["max_bid_levels"], len(bid_prices)
+                )
+                result["max_ask_levels"] = max(
+                    result["max_ask_levels"], len(ask_prices)
+                )
         elif template_id == 101:
-            subscription_ack = message
             codes = list(message.rp_code)
-            print("\nMarket-data subscription response (101):")
+            echoed_tokens = list(message.user_msg)
+            symbol = next(
+                (token_to_symbol[token] for token in echoed_tokens if token in token_to_symbol),
+                None,
+            )
+            print(f"\nMarket-data subscription response (101):")
+            print(f"  correlation: {symbol or 'unmatched'}")
             print(f"  response code: {codes}")
-            print(f"  message: {list(message.user_msg)}")
+            print(f"  message: {echoed_tokens}")
             print(f"  status: {'SUCCESS' if codes == ['0'] else 'FAILED'}")
+            if symbol is not None:
+                results[symbol]["ack"] = {
+                    "codes": codes,
+                    "messages": echoed_tokens,
+                }
         elif template_id == 19:
             continue
         elif template_id == 13:
             print("\nReceived logout response.")
+            ended_early = "server sent logout response"
             break
         else:
             print_decoded(template_id, message)
 
-    if subscription_ack is None:
-        print("\nMarket-data subscription response: NOT RECEIVED")
-    print(f"BBO updates received: {'YES' if counts[151] else 'NO'} ({counts[151]})")
-    print(
-        f"Last-trade updates received: "
-        f"{'YES' if counts[150] else 'NO'} ({counts[150]})"
-    )
-    if depth == "level2":
-        print(
-            f"Order-book updates received: "
-            f"{'YES' if counts[ORDER_BOOK_TEMPLATE_ID] else 'NO'} "
-            f"({counts[ORDER_BOOK_TEMPLATE_ID]})"
-        )
-        print(
-            "Distinct order-book prices observed: "
-            f"{len(all_bid_prices)} bid / {len(all_ask_prices)} ask"
-        )
-        print(
-            "Maximum price levels in one order-book message: "
-            f"{max_bid_levels_in_message} bid / {max_ask_levels_in_message} ask"
-        )
-        if max_bid_levels_in_message > 1 and max_ask_levels_in_message > 1:
-            print("Multiple order-book price levels observed: YES")
-        elif counts[ORDER_BOOK_TEMPLATE_ID]:
-            print("Multiple order-book price levels observed: NOT CONFIRMED")
+    print("\nPer-symbol results:")
+    for symbol, result in results.items():
+        ack = result["ack"]
+        if ack is None:
+            ack_status = "NOT RECEIVED"
         else:
-            print("Multiple order-book price levels observed: NO")
+            ack_status = "SUCCESS" if ack["codes"] == ["0"] else "FAILED"
+        print(f"  {symbol}:")
+        print(f"    subscription acknowledgement: {ack_status}")
+        if ack is not None and ack_status == "FAILED":
+            print(f"    subscription response: {ack['codes']} {ack['messages']}")
+        print(f"    BBO updates: {result['bbo']}")
+        print(f"    last-trade updates: {result['last_trade']}")
+        if depth == "level2":
+            print(f"    order-book updates: {result['order_book']}")
+            print(
+                "    distinct depth prices: "
+                f"{len(result['bid_prices'])} bid / "
+                f"{len(result['ask_prices'])} ask"
+            )
+            print(
+                "    maximum levels in one message: "
+                f"{result['max_bid_levels']} bid / "
+                f"{result['max_ask_levels']} ask"
+            )
+    if connection_closed is None:
+        if ended_early:
+            print(f"Connection status: test ended early because the {ended_early}.")
+        else:
+            print(f"Connection status: remained open for the {duration:g}s test.")
     else:
-        print("Order-book updates: NOT REQUESTED (Level 1 test)")
+        print(
+            "Connection status: closed before test completion "
+            f"(code={connection_closed.code}, reason={connection_closed.reason!r})."
+        )
 
 
 async def run_market_data(args, modules):
@@ -460,41 +517,55 @@ async def run_market_data(args, modules):
             )
             if not authenticated:
                 print(
-                    "No market-data request was sent. The RTrader Pro login does "
-                    "not confirm R|Protocol API login permission; verify the "
-                    "Protocol API/Ticker Plant entitlement and credentials with "
-                    "the Rithmic provider."
+                    "No market-data request was sent because the Protocol API "
+                    "login did not succeed."
                 )
                 return
 
-            print(f"Requested market-data tier: {args.depth.upper()}")
-            await subscribe(ws, modules, args.exchange, args.symbol, args.depth)
-            subscribed = True
+            symbols = args.symbol
+            print(
+                f"Requested market-data tier: {args.depth.upper()} "
+                f"for {len(symbols)} symbol(s): {', '.join(symbols)}"
+            )
+            correlation_ids = {}
+            for symbol in symbols:
+                try:
+                    correlation_ids[symbol] = await subscribe(
+                        ws, modules, args.exchange, symbol, args.depth
+                    )
+                except ConnectionClosed as error:
+                    print(
+                        f"WebSocket closed while subscribing to {symbol} "
+                        f"(code={error.code}, reason={error.reason!r})."
+                    )
+                    break
+                subscribed = True
+                print(f"Subscription request sent: {symbol} / {args.exchange}")
             await listen(
                 ws,
                 modules,
                 args.seconds,
                 heartbeat_interval,
                 args.exchange,
-                args.symbol,
+                symbols,
                 args.depth,
+                correlation_ids,
             )
         finally:
             if authenticated:
                 try:
                     if subscribed:
-                        unsubscribe = modules["market_data_request"].RequestMarketDataUpdate()
-                        unsubscribe.template_id = 100
-                        unsubscribe.symbol = args.symbol
-                        unsubscribe.exchange = args.exchange
-                        unsubscribe.request = (
-                            modules["market_data_request"]
-                            .RequestMarketDataUpdate.Request.UNSUBSCRIBE
-                        )
-                        unsubscribe.update_bits = market_data_update_bits(
-                            modules, args.depth
-                        )
-                        await ws.send(unsubscribe.SerializeToString())
+                        request_type = modules["market_data_request"].RequestMarketDataUpdate
+                        for symbol in args.symbol:
+                            unsubscribe = request_type()
+                            unsubscribe.template_id = 100
+                            unsubscribe.symbol = symbol
+                            unsubscribe.exchange = args.exchange
+                            unsubscribe.request = request_type.Request.UNSUBSCRIBE
+                            unsubscribe.update_bits = market_data_update_bits(
+                                modules, args.depth
+                            )
+                            await ws.send(unsubscribe.SerializeToString())
 
                     logout = modules["logout_request"].RequestLogout()
                     logout.template_id = 12
@@ -515,7 +586,11 @@ def parse_args():
     )
     parser.add_argument("--system", help="Exact Rithmic system name from system discovery.")
     parser.add_argument("--exchange", help="Rithmic exchange code, e.g. COMEX.")
-    parser.add_argument("--symbol", help="Exact Rithmic contract symbol, e.g. MGCZ6.")
+    parser.add_argument(
+        "--symbol",
+        action="append",
+        help="Exact Rithmic contract symbol; repeat to subscribe to multiple instruments.",
+    )
     parser.add_argument(
         "--depth",
         choices=("level1", "level2"),
@@ -531,11 +606,15 @@ def parse_args():
     if not args.discover and not args.discover_gateways:
         missing = [
             option
-            for option in ("system", "exchange", "symbol")
+            for option in ("system", "exchange")
             if not getattr(args, option)
         ]
+        if not args.symbol:
+            missing.append("symbol")
         if missing:
             parser.error("market-data mode requires --system, --exchange, and --symbol")
+        if len(set(args.symbol)) != len(args.symbol):
+            parser.error("--symbol values must be unique")
     if args.seconds <= 0:
         parser.error("--seconds must be greater than zero")
     return args
