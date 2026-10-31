@@ -1,0 +1,19 @@
+
+package rti;
+
+message ResponseShowAccUserHistory
+	{       
+	required int32    template_id           = 154467;
+	repeated string   user_msg              = 132760;
+	repeated string   rq_handler_rp_code    = 132764;
+	repeated string   rp_code               = 132766;
+
+	optional string   update_type           = 154288;
+	optional string   source_user_id        = 154247;
+
+	optional int32    ssboe                 = 150100;
+	optional int32    usecs                 = 150101;
+
+	repeated string   field_name            = 157809;
+	repeated string   field_data            = 157810;
+        }

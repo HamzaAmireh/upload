@@ -1,0 +1,24 @@
+
+package rti;
+
+message RequestSessionConfig
+	{                        
+	required int32   template_id              = 154467;
+	repeated string  user_msg                 = 132760;
+
+	optional string  session_type             = 157165;	//  op or pnl
+
+
+	/* following fields can be applied to either order plant (op) or  pnl plnat (pnl) sessions */
+
+	optional string  add_proto_srvr_timestamp = 154270;	// enabled or disabled;	  only for fcm/ib login session	
+
+
+	/* following fields are specific to order plant (op) session */
+
+	optional bool    should_defer_request     = 157750;	// used only when the server has to fetch refdata from the system instead from it's own database.
+	                                       	                // If this field is true, requests are deferred and server loads refdata automatically
+
+	optional string  push_user_updates        = 157806;	// enabled or disabled;	  only for fcm/ib login session
+	optional string  push_account_updates     = 157807;	// enabled or disabled;	  only for fcm/ib login session
+	}

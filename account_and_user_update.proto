@@ -1,0 +1,89 @@
+
+package rti;
+
+message AccountAndUserUpdate
+	{       
+	required int32    template_id                                    = 154467;
+
+	optional string   update_type                                    = 154288;
+
+	optional string   fcm_id                                         = 154013;
+	optional string   ib_id                                          = 154014;
+
+	optional int32    ssboe                                          = 150100;
+	optional int32    usecs                                          = 150101;
+	
+	optional string   access_type                                    = 154000; // 0 - read_only, 1 - read_write
+	optional string   source_user_id                                 = 154247;
+	optional string   user                                           = 131003;
+	
+	optional string   account_id                                     = 154008;
+	optional string   account_name                                   = 154002;
+	optional string   account_status                                 = 154003;
+	optional string   cash_on_hand                                   = 156971;
+	optional string   orig_cash_on_hand                              = 156974;
+	optional string   delta_cash_on_hand                             = 156973;
+	optional string   loss_limit                                     = 154019;
+	optional string   buy_limit                                      = 154009;
+	optional string   max_limit_quantity                             = 110105;
+	optional string   sell_limit                                     = 154035;
+	optional string   min_margin_balance                             = 156976;
+	optional string   net_open_value_limit                           = 156988;
+	optional string   min_account_balance                            = 156968;
+	optional string   commission_fill_rate                           = 156969;
+	optional string   product_code                                   = 100749;
+	optional string   buy_margin_rate                                = 157003;
+	optional string   sell_margin_rate                               = 157004;
+	optional string   liq_only                                       = 153076;
+	optional string   mulitple_liq_auto_liq_threshold                = 153555;
+	optional string   multiple_liq_auto_liq_max_min_account_balance  = 153556;
+	optional string   multiple_liq_auto_liq_criteria                 = 153554;
+	optional string   ib_liq_only                                    = 153557;
+	optional string   ib_account_auto_liq                            = 153540;
+	optional string   ib_liq_only_on_auto_liq_flag                   = 153551;
+	optional string   ib_account_auto_liq_criteria                   = 153541;
+	optional string   ib_account_auto_liq_threshold                  = 153542;
+	optional string   user_defined_risk_limits_user                  = 153383;
+	optional string   user_risk_limits_status                        = 153520;
+	optional string   user_no_trade_time_ssm_start                   = 131045;
+	optional string   user_no_trade_time_ssm_stop                    = 131046;
+	optional string   user_account_auto_liq                          = 153530;
+	optional string   user_account_auto_liq_criteria                 = 153531;
+	optional string   user_account_auto_liq_threshold                = 153532;
+	optional string   user_auto_liq_max_min_account_balance          = 153533;
+	optional string   user_auto_liq_time_ssm                         = 131042;
+	optional string   multiple_liq_auto_liquidate                    = 153553;
+	optional string   user_liq_only                                  = 153536;
+	
+	optional string   first_name                                     = 154216;
+	optional string   last_name                                      = 154217;
+	optional string   email_address                                  = 150110;
+
+	optional string   country_code                                   = 154712;
+	optional string   state_code                                     = 154713;
+	
+	optional string   address_street_1                               = 144511;
+	optional string   address_street_2                               = 144512;
+	optional string   address_city                                   = 144513;
+	optional string   address_state                                  = 144514;
+	optional string   address_country                                = 144515;
+	optional string   address_zip                                    = 144519;
+
+	optional string   phone_residence                                = 144516;
+	optional string   phone_work                                     = 144517;
+	optional string   phone_mobile                                   = 144518;
+
+	optional string   type                                           = 154036;		// possbile values - 3 (trader), 2 (ib user), 1 (fcm user)
+	optional string   status                                         = 156975; 		// enabled or disabled
+	optional string   order_copy_status                              = 158206;		// enabled or disabled	
+
+	optional string   exchange                                       = 110101;		// exchange related to market data entitlements
+	optional string   level_1_market_data                            = 153400;               // level_1 (top of book) entitlement status
+	optional string   level_2_market_data                            = 153217;               // level_2 (order book) entitlement status
+
+	optional string   app_entitlement                                = 153195;		// all or none
+	optional string   app_name                                       = 130002;
+
+	optional int32    tp_max_session_count                           = 140000;               // ticker_plant (market data) max session count
+	optional int32    op_max_session_count                           = 140012;               // order_plant max session count
+	}

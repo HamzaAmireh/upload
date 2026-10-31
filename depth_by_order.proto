@@ -1,0 +1,43 @@
+
+package rti;
+
+message DepthByOrder
+	{                                     
+        enum TransactionType {
+	                      BUY  = 1;
+		              SELL = 2;
+	                     }
+
+	enum UpdateType {
+	     		 NEW    = 1;
+                         CHANGE = 2;
+                         DELETE = 3;
+                        }
+
+	required int32            template_id            = 154467;
+
+	optional string           symbol                 = 110100;
+	optional string           exchange               = 110101;
+	optional uint64           sequence_number        = 112002;
+
+	repeated UpdateType       update_type            = 110121;
+	repeated TransactionType  transaction_type       = 153612;
+
+	repeated double           depth_price            = 154405;
+	repeated double           prev_depth_price       = 154906;
+	repeated bool             prev_depth_price_flag  = 154930;
+	repeated int32            depth_size             = 154406;	// deprecated, use depth_size_64 instead
+	repeated uint64           depth_size_64          = 159009;
+	repeated uint64           depth_order_priority   = 153613;
+	repeated string           exchange_order_id      = 149238;
+
+	optional int32            ssboe                  = 150100;
+	optional int32            usecs                  = 150101;
+
+	optional int32            source_ssboe           = 150400;
+	optional int32            source_usecs           = 150401;
+	optional int32            source_nsecs           = 150404;
+
+	optional int32            jop_ssboe              = 150600;
+	optional int32            jop_nsecs              = 150604;
+	}

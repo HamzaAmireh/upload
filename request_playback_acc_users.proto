@@ -1,0 +1,12 @@
+
+package rti;
+
+message RequestPlaybackAccUsers
+	{                                
+	required int32    template_id   = 154467;
+	repeated string   user_msg      = 132760;
+
+	optional string   playback      = 124000;	// accounts, users or all
+	optional int32    start_index   = 153002;	// required field, seconds since beginning of epoch
+	optional int32    finish_index  = 153003;	// optional field, seconds since beginning of epoch
+	}

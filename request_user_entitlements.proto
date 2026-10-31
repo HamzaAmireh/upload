@@ -1,0 +1,11 @@
+
+package rti;
+
+message RequestUserEntitlements
+	{                                
+	required int32    template_id   = 154467;
+	repeated string   user_msg      = 132760;
+
+	optional string   user          = 154220;	
+	optional string   entitlements  = 153400;	// exchange, application or all
+	}

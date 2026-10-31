@@ -1,0 +1,52 @@
+
+package rti;
+
+message LastTrade
+	{                                     
+	// below enum is just for reference only, not used in this message
+	enum PresenceBits {
+	                  LAST_TRADE      =   1;
+			  NET_CHANGE      =   2;
+		          PERCENT_CHANGE  =   4;
+		          VOLUME          =   8;
+			  VWAP		  =  16;
+                          }
+
+        enum TransactionType {
+	                      BUY  = 1;
+		              SELL = 2;
+	                     }
+
+	required int32            template_id                  = 154467;
+	optional string           symbol                       = 110100;
+	optional string           exchange                     = 110101;
+
+	optional uint32           presence_bits                = 149138;
+	optional uint32           clear_bits                   = 154571;
+	optional bool             is_snapshot                  = 110121;
+
+	optional double           trade_price                  = 100006;
+	optional int32            trade_size                   = 100178;	//deprecated, use trade_size_64 instead
+	optional uint64           trade_size_64                = 159008;
+	optional TransactionType  aggressor                    = 112003;
+
+	optional string           exchange_order_id            = 149238;
+	optional string           aggressor_exchange_order_id  = 154641;
+
+	optional double           net_change                   = 100011;
+	optional double           percent_change               = 100056;
+	optional uint64           volume                       = 100032;
+	optional double           vwap                         = 101379;
+
+	optional string           trade_time                   = 100379;
+
+	optional int32            ssboe                        = 150100;
+	optional int32            usecs                        = 150101;
+
+	optional int32            source_ssboe                 = 150400;
+	optional int32            source_usecs                 = 150401;
+	optional int32            source_nsecs                 = 150404;
+
+	optional int32            jop_ssboe                    = 150600;
+	optional int32            jop_nsecs                    = 150604;
+	}
