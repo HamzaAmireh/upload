@@ -87,6 +87,9 @@ class PriceTargetEngine:
         # ── Order book depth snapshot (price -> size) ──
         self.bid_depth = {}   # price -> size
         self.ask_depth = {}   # price -> size
+        self.bid_depth_order = {}
+        self.ask_depth_order = {}
+        self.next_depth_sequence = 0
         self.bid_price_heap = []
         self.ask_price_heap = []
         self.bid_price_buckets = {}
@@ -95,11 +98,11 @@ class PriceTargetEngine:
         self.price_bucket_width = 8.0
         self.memory_cleanup_queue = deque()
         self.memory_cleanup_queued = set()
-        self.memory_cleanup_budget = 512
-        self.memory_cleanup_interval = 0.25
+        self.memory_cleanup_budget = 64
+        self.memory_cleanup_interval = 0.05
         self.last_memory_maintenance = 0.0
         self.last_decay_update = 0.0
-        self.market_revision = 0
+        self.probability_revision = 0
         self.depth_revision = 0
         self.book_revision = 0
         self.state_revision = 0
@@ -138,18 +141,27 @@ class PriceTargetEngine:
             try:
                 with self.probability_lock:
                     if self.tracking_active:
-                        with self.market_lock:
-                            probability_key = (self.market_revision, self.state_revision)
-                        if self.probability_cache_key != probability_key:
-                            self.latest_probabilities = self.calculate_probabilities()
-                            with self.market_lock:
-                                if self.market_revision == probability_key[0]:
-                                    self.probability_cache_key = probability_key
+                        self.refresh_probabilities_if_changed()
                 self.check_auto_trend()
                 self.maintain_liquidity_memory()
             except Exception as e:
                 log_msg(f"Backbone loop error: {e}")
             time.sleep(0.05)
+
+    def refresh_probabilities_if_changed(self):
+        with self.probability_lock:
+            with self.market_lock:
+                probability_key = (self.probability_revision, self.state_revision)
+            if self.probability_cache_key == probability_key:
+                return False
+
+            probabilities = self.calculate_probabilities()
+            with self.market_lock:
+                if self.probability_revision != probability_key[0]:
+                    return False
+                self.latest_probabilities = probabilities
+                self.probability_cache_key = probability_key
+                return True
 
     # ── Settings update ──
     def update_settings(self, settings):
@@ -220,10 +232,17 @@ class PriceTargetEngine:
                 return round(self.user_driving_price / self.pips)
             return self.user_driving_price
         with self.market_lock:
-            if self.best_bid is not None and self.best_ask is not None:
-                return round((self.best_bid + self.best_ask) / 2)
-            if self.last_trade_price is not None:
-                return self.last_trade_price
+            return self._get_driving_price_locked()
+
+    def _get_driving_price_locked(self):
+        if not self.use_live_price and self.user_driving_price is not None:
+            if self.pips > 0:
+                return round(self.user_driving_price / self.pips)
+            return self.user_driving_price
+        if self.best_bid is not None and self.best_ask is not None:
+            return round((self.best_bid + self.best_ask) / 2)
+        if self.last_trade_price is not None:
+            return self.last_trade_price
         return None
 
     # ── Convert tick price to display price ──
@@ -269,6 +288,27 @@ class PriceTargetEngine:
                 for price in bucket:
                     if p_min <= price <= p_max:
                         total += depth[price]
+        return total
+
+    def _capture_depth_range_locked(self, buckets, depth, depth_order, p_min, p_max):
+        captured = []
+        first_bucket = self._bucket_id(p_min)
+        last_bucket = self._bucket_id(p_max)
+        for bucket_id in range(first_bucket, last_bucket + 1):
+            bucket = buckets.get(bucket_id)
+            if not bucket:
+                continue
+            for price in bucket:
+                if p_min <= price <= p_max:
+                    captured.append((depth_order[price], price, depth[price]))
+        return captured
+
+    @staticmethod
+    def _sum_captured_range(captured, p_min, p_max):
+        total = 0
+        for _, price, size in captured:
+            if p_min <= price <= p_max:
+                total += size
         return total
 
     def _sum_depth_range_locked(self, p_min, p_max, is_ask):
@@ -401,7 +441,7 @@ class PriceTargetEngine:
             now = time.time()
             if update_decay:
                 if self.update_decay_rate(now):
-                    self.market_revision += 1
+                    self.probability_revision += 1
                 self.last_decay_update = now_monotonic
 
             if cleanup_due:
@@ -417,7 +457,6 @@ class PriceTargetEngine:
                     if now - memory['time'] > expiry:
                         del self.liquidity_memory[price]
                         self._remove_indexed_price(self.memory_price_buckets, price)
-                        self.market_revision += 1
                     else:
                         self.memory_cleanup_queue.append(price)
                         self.memory_cleanup_queued.add(price)
@@ -630,7 +669,6 @@ class PriceTargetEngine:
             
             with self.market_lock:
                 self._clear_liquidity_memory_locked()
-                self.market_revision += 1
 
     def check_auto_trend(self):
         with self.phase_transition_lock:
@@ -736,82 +774,90 @@ class PriceTargetEngine:
                 sell_market_volume = self.sell_market_volume
                 tracking_active = self.tracking_active
                 depth_revision = self.depth_revision
+                now_t = time.time()
+                if tracking_active and dp is not None:
+                    if self.session_high_price is None or dp > self.session_high_price:
+                        self.session_high_price = dp
+                        self.session_high_time = now_t
+                    if self.session_low_price is None or dp < self.session_low_price:
+                        self.session_low_price = dp
+                        self.session_low_time = now_t
 
-            now_t = time.time()
-            if tracking_active and dp is not None:
-                if self.session_high_price is None or dp > self.session_high_price:
-                    self.session_high_price = dp
-                    self.session_high_time = now_t
-                if self.session_low_price is None or dp < self.session_low_price:
-                    self.session_low_price = dp
-                    self.session_low_time = now_t
-
-            tracking_start_time = self.tracking_start_time
-            elapsed = round(now_t - tracking_start_time, 1) if tracking_start_time else 0
-            anchor = self.session_anchor_price
-            high_price = self.session_high_price
-            low_price = self.session_low_price
-            high_time = self.session_high_time
-            low_time = self.session_low_time
-            num_levels = self.num_levels
-            target_distance = self.delta_target_distance
-            initial_sell_limits = self.initial_sell_limits
-            initial_buy_limits = self.initial_buy_limits
-            recording_phase = self.recording_phase
-            absolute_phase = self.absolute_phase
-            milestone_target = self.milestone_target
-            state_revision = self.state_revision
-
-        cache_key = (depth_revision, state_revision)
-        with self.snapshot_cache_lock:
-            cached = self.snapshot_cache_key == cache_key
-            if cached:
-                levels_data = self.snapshot_levels_cache
-
-        if not cached:
-            with self.market_lock:
-                depth_revision = self.depth_revision
-                dp = self.get_driving_price()
-                best_bid = self.best_bid
-                best_ask = self.best_ask
-                buy_market_volume = self.buy_market_volume
-                sell_market_volume = self.sell_market_volume
-                tracking_active = self.tracking_active
+                tracking_start_time = self.tracking_start_time
+                elapsed = round(now_t - tracking_start_time, 1) if tracking_start_time else 0
+                anchor = self.session_anchor_price
+                high_price = self.session_high_price
+                low_price = self.session_low_price
+                high_time = self.session_high_time
+                low_time = self.session_low_time
+                num_levels = self.num_levels
+                target_distance = self.delta_target_distance
+                initial_sell_limits = self.initial_sell_limits.copy()
+                initial_buy_limits = self.initial_buy_limits.copy()
+                recording_phase = self.recording_phase
+                absolute_phase = self.absolute_phase
+                milestone_target = self.milestone_target
+                state_revision = self.state_revision
                 cache_key = (depth_revision, state_revision)
+
                 with self.snapshot_cache_lock:
                     cached = self.snapshot_cache_key == cache_key
                     if cached:
                         levels_data = self.snapshot_levels_cache
 
-                if not cached:
-                    levels_data = []
-                    if anchor is not None:
-                        for i in range(1, num_levels + 1):
-                            start_offset = target_distance * (i - 1)
-                            end_offset = target_distance * i
-                            current_sell = self._sum_depth_range_locked(
-                                anchor + start_offset, anchor + end_offset, True
-                            )
-                            current_buy = self._sum_depth_range_locked(
-                                anchor - end_offset, anchor - start_offset, False
-                            )
-                            initial_sell = initial_sell_limits.get(i, 0)
-                            initial_buy = initial_buy_limits.get(i, 0)
-                            levels_data.append({
-                                "level": i,
-                                "start_offset": start_offset,
-                                "end_offset": end_offset,
-                                "initial_sell_limits": initial_sell,
-                                "current_sell_limits": current_sell,
-                                "delta_sell": current_sell - initial_sell,
-                                "initial_buy_limits": initial_buy,
-                                "current_buy_limits": current_buy,
-                                "delta_buy": current_buy - initial_buy,
-                            })
+                if not cached and anchor is not None:
+                    final_offset = target_distance * num_levels
+                    ask_min = min(anchor, anchor + final_offset)
+                    ask_max = max(anchor, anchor + final_offset)
+                    bid_min = min(anchor, anchor - final_offset)
+                    bid_max = max(anchor, anchor - final_offset)
+                    ask_candidates = self._capture_depth_range_locked(
+                        self.ask_price_buckets, self.ask_depth, self.ask_depth_order,
+                        ask_min, ask_max
+                    )
+                    bid_candidates = self._capture_depth_range_locked(
+                        self.bid_price_buckets, self.bid_depth, self.bid_depth_order,
+                        bid_min, bid_max
+                    )
+                elif not cached:
+                    ask_candidates = []
+                    bid_candidates = []
 
-                    with self.snapshot_cache_lock:
-                        self.snapshot_cache_key = cache_key
-                        self.snapshot_levels_cache = levels_data
+        if not cached:
+            ask_candidates.sort(key=lambda item: item[0])
+            bid_candidates.sort(key=lambda item: item[0])
+            levels_data = []
+            if anchor is not None:
+                for i in range(1, num_levels + 1):
+                    start_offset = target_distance * (i - 1)
+                    end_offset = target_distance * i
+                    ask_start = anchor + start_offset
+                    ask_end = anchor + end_offset
+                    bid_start = anchor - end_offset
+                    bid_end = anchor - start_offset
+                    current_sell = self._sum_captured_range(
+                        ask_candidates, min(ask_start, ask_end), max(ask_start, ask_end)
+                    )
+                    current_buy = self._sum_captured_range(
+                        bid_candidates, min(bid_start, bid_end), max(bid_start, bid_end)
+                    )
+                    initial_sell = initial_sell_limits.get(i, 0)
+                    initial_buy = initial_buy_limits.get(i, 0)
+                    levels_data.append({
+                        "level": i,
+                        "start_offset": start_offset,
+                        "end_offset": end_offset,
+                        "initial_sell_limits": initial_sell,
+                        "current_sell_limits": current_sell,
+                        "delta_sell": current_sell - initial_sell,
+                        "initial_buy_limits": initial_buy,
+                        "current_buy_limits": current_buy,
+                        "delta_buy": current_buy - initial_buy,
+                    })
+
+            with self.snapshot_cache_lock:
+                self.snapshot_cache_key = cache_key
+                self.snapshot_levels_cache = levels_data
 
         return {
             "type": "snapshot",
@@ -838,6 +884,9 @@ class PriceTargetEngine:
     def _reset_market_book_locked(self):
         self.bid_depth.clear()
         self.ask_depth.clear()
+        self.bid_depth_order.clear()
+        self.ask_depth_order.clear()
+        self.next_depth_sequence = 0
         self.bid_price_heap.clear()
         self.ask_price_heap.clear()
         self.bid_price_buckets.clear()
@@ -852,7 +901,7 @@ class PriceTargetEngine:
         self.last_down_weights.clear()
         self.book_revision += 1
         self.depth_revision += 1
-        self.market_revision += 1
+        self.probability_revision += 1
         with self.snapshot_cache_lock:
             self.snapshot_cache_key = None
 
@@ -891,7 +940,54 @@ class PriceTargetEngine:
         elif tps < 5: self.dynamic_decay_period = 5.0  # Low Vol
         else: self.dynamic_decay_period = 3.0           # Normal
         return self.dynamic_decay_period != previous_period
-        
+
+    def _visible_liquidity_at_price(self, actual_size, memory, now):
+        if actual_size is not None:
+            decayed_size = actual_size
+            if memory:
+                elapsed = now - memory['time']
+                if elapsed < self.dynamic_decay_period:
+                    potential = memory['size'] * (
+                        (self.dynamic_decay_period - elapsed) / self.dynamic_decay_period
+                    )
+                    decayed_size = max(actual_size, potential)
+            return max(actual_size, decayed_size), decayed_size > actual_size + 1
+
+        if memory:
+            elapsed = now - memory['time']
+            if elapsed < self.dynamic_decay_period:
+                visible_size = memory['size'] * (
+                    (self.dynamic_decay_period - elapsed) / self.dynamic_decay_period
+                )
+                return visible_size, visible_size > 1
+        return 0, False
+
+    def _probability_effects_at_price_locked(self, price, memory, now, driving_price,
+                                             bid_size=None, ask_size=None):
+        if bid_size is None:
+            bid_size = self.bid_depth.get(price)
+        if ask_size is None:
+            ask_size = self.ask_depth.get(price)
+        if driving_price is None:
+            return ()
+
+        up_relevant = False
+        down_relevant = False
+        for index in range(self.num_levels):
+            high = driving_price + self.target_distance * (index + 1) + self.lookahead_ticks
+            low = driving_price - self.target_distance * (index + 1) - self.lookahead_ticks
+            if driving_price <= price <= high:
+                up_relevant = True
+            if low <= price <= driving_price:
+                down_relevant = True
+
+        effects = []
+        if up_relevant:
+            effects.append(("up", self._visible_liquidity_at_price(ask_size, memory, now)))
+        if down_relevant:
+            effects.append(("down", self._visible_liquidity_at_price(bid_size, memory, now)))
+        return tuple(effects)
+
     def kill_ghost_at_price(self, price):
         """Instantly deletes memory if price trades through it (The Kill Switch)."""
         if price in self.liquidity_memory:
@@ -911,28 +1007,47 @@ class PriceTargetEngine:
             tick_price = int(round(price))
             # Convert Bookmap's internal size to real contract volume
             real_size = size / self.size_multiplier if hasattr(self, 'size_multiplier') and self.size_multiplier else size
+            now = time.time()
+            previous_driving_price = self._get_driving_price_locked()
+            previous_memory = self.liquidity_memory.get(tick_price)
+            previous_effects = self._probability_effects_at_price_locked(
+                tick_price, previous_memory, now, previous_driving_price
+            )
+            previous_bid_size = self.bid_depth.get(tick_price)
+            previous_ask_size = self.ask_depth.get(tick_price)
 
-            # ── Kill Switch ──
-            changed = self.kill_ghost_at_price(tick_price)
-            
-            if self.last_trade_price != tick_price:
-                changed = True
+            self.kill_ghost_at_price(tick_price)
             self.last_trade_price = tick_price
 
             # Velocity tracking
             if tick_price != self.last_price_for_velocity:
-                self.tick_history.append(time.time())
+                self.tick_history.append(now)
                 self.last_price_for_velocity = tick_price
-                changed = True
 
+            volume_changed = False
             if self.tracking_active:
                 if is_buy_aggressor:
+                    previous_volume = self.buy_market_volume
                     self.buy_market_volume += real_size
+                    volume_changed = self.buy_market_volume != previous_volume
                 else:
+                    previous_volume = self.sell_market_volume
                     self.sell_market_volume += real_size
-                changed = True
-            if changed:
-                self.market_revision += 1
+                    volume_changed = self.sell_market_volume != previous_volume
+
+            current_driving_price = self._get_driving_price_locked()
+            current_effects = self._probability_effects_at_price_locked(
+                tick_price, self.liquidity_memory.get(tick_price), now,
+                current_driving_price,
+                previous_bid_size, previous_ask_size
+            )
+            probability_changed = (
+                previous_driving_price != current_driving_price
+                or previous_effects != current_effects
+                or volume_changed
+            )
+            if probability_changed:
+                self.probability_revision += 1
 
     def on_depth(self, alias, is_bid, price, size):
         with self.market_lock:
@@ -940,21 +1055,33 @@ class PriceTargetEngine:
                 return
             # Convert internal size to real limit size
             real_size = size / self.size_multiplier if hasattr(self, 'size_multiplier') and self.size_multiplier else size
-            
-            # ── Kill Switch ──
-            ghost_removed = self.kill_ghost_at_price(price)
-            
             target_dict = self.bid_depth if is_bid else self.ask_depth
+            target_order = self.bid_depth_order if is_bid else self.ask_depth_order
             price_heap = self.bid_price_heap if is_bid else self.ask_price_heap
             price_buckets = self.bid_price_buckets if is_bid else self.ask_price_buckets
-            book_changed = False
+
+            previous_size = target_dict.get(price)
+            if real_size > 0 and previous_size == real_size:
+                return
+
+            now = time.time()
+            previous_memory = self.liquidity_memory.get(price)
+            previous_effects = ()
+            previous_driving_price = None
+            if real_size <= 0 and previous_size is None and previous_memory is not None:
+                previous_driving_price = self._get_driving_price_locked()
+                previous_effects = self._probability_effects_at_price_locked(
+                    price, previous_memory, time.time(), previous_driving_price
+                )
+
+            self.kill_ghost_at_price(price)
             if real_size > 0:
-                previous_size = target_dict.get(price)
                 if price not in target_dict:
                     self._add_indexed_price(price_buckets, price)
                     heapq.heappush(price_heap, -price if is_bid else price)
                     self.book_revision += 1
-                    book_changed = True
+                    self.next_depth_sequence += 1
+                    target_order[price] = self.next_depth_sequence
                 target_dict[price] = real_size
                 if previous_size != real_size:
                     self.depth_revision += 1
@@ -963,7 +1090,7 @@ class PriceTargetEngine:
                 if not mem or real_size > mem['size']:
                     self.liquidity_memory[price] = {
                         'size': real_size, 
-                        'time': time.time(),
+                        'time': now,
                         'side': 'bid' if is_bid else 'ask'
                     }
                     self._add_indexed_price(self.memory_price_buckets, price)
@@ -973,11 +1100,10 @@ class PriceTargetEngine:
             else:
                 if price in target_dict:
                     del target_dict[price]
+                    target_order.pop(price, None)
                     self._remove_indexed_price(price_buckets, price)
                     self.book_revision += 1
                     self.depth_revision += 1
-                    book_changed = True
-                    ghost_removed = True
 
             while self.bid_price_heap and -self.bid_price_heap[0] not in self.bid_depth:
                 heapq.heappop(self.bid_price_heap)
@@ -986,8 +1112,15 @@ class PriceTargetEngine:
                 heapq.heappop(self.ask_price_heap)
             self.best_ask = self.ask_price_heap[0] if self.ask_price_heap else None
 
-            if real_size > 0 or ghost_removed or book_changed:
-                self.market_revision += 1
+            if real_size > 0 or previous_size is not None:
+                self.probability_revision += 1
+            elif previous_memory is not None:
+                current_effects = self._probability_effects_at_price_locked(
+                    price, None, time.time(), previous_driving_price,
+                    self.bid_depth.get(price), self.ask_depth.get(price)
+                )
+                if previous_effects != current_effects:
+                    self.probability_revision += 1
 
 
 # ══════════════════════════════════════════════════════
